@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#! /usr/bin/env python
 """A hacked up version of the multiple-Python checkers script from EmacsWiki.
 
 Original work taken from http://www.emacswiki.org/emacs/PythonMode, author
@@ -110,7 +110,7 @@ def croak(msgs, filename):
     sys.exit(1)
 
 
-class LintRunner(object):
+class LintRunner:
     """Base class provides common functionality to run python code checkers."""
 
     out_fmt = ("%(level)s %(error_type)s%(error_number)s:"
@@ -148,6 +148,7 @@ class LintRunner(object):
         self._version = None              # type: Optional[LooseVersion]
         # Any debugging output
         self._debug_lines = []            # type: List[str]
+        self._exclude_files = ["flycheck_*"]
 
     @property
     def ignore_codes(self):
@@ -230,6 +231,10 @@ class LintRunner(object):
             self._version = LooseVersion(self._get_version() or '0')
             assert self._version  # make mypy happy
         return self._version
+
+    @property
+    def exclusions(self):
+        return self._exclude_files
 
     def get_run_flags(self, _filepath):
         # type: (str) -> Iterable[str]
@@ -492,6 +497,13 @@ class LintRunner(object):
         errors_or_warnings, out_lines = self._process_streams(
             filepath, out.splitlines(), err.splitlines())
 
+        # with open("/home/joe/checker_failure", "a") as f:
+        #     f.write("\n")
+        #     f.write(f"{len(err)}, {bool(err)}, {process.returncode}\n")
+        #     if err:
+        #         f.write(f"{err}")
+        #     f.write(f"{args}\n")
+
         if not self.process_returncode(process.returncode):
             errors_or_warnings += 1
             out_lines += [
@@ -651,6 +663,61 @@ class Flake8Runner(LintRunner):
             '--max-line-length', str(self.options.max_line_length),
         ]
         return args
+
+
+class RuffRunner(LintRunner):
+    """Flake8 has similar output to Pyflakes
+    """
+
+    command = 'ruff'
+
+    output_matcher = re.compile(
+        r'(?P<filename>[^:]+):'
+        '(?P<line_number>[^:]+):'
+        '(?P<column_number>[^:]+): '
+        '(?P<error_type>[A-Z])(?P<error_number>[^ ]+) '
+        '(?P<description>.+)$')
+
+    version_matcher = re.compile(
+        r'(?P<version>[0-9.]+).*'
+    )
+
+    @classmethod
+    def fixup_data(cls, _line, data, _filepath):
+        # type: (str, Dict[str, str], str) -> Dict[str, str]
+        if data['error_type'] in ['E']:
+            data['level'] = 'WARNING'
+        elif data['error_type'] in ['F']:
+            data['level'] = 'ERROR'
+        else:
+            data['level'] = 'WARNING'
+
+        # Unlike pyflakes, flake8 has an error/warning distinction, but some of
+        # them are incorrect. Borrow the correct definitions from the pyflakes
+        # runner
+        if 'imported but unused' in data['description']:
+            data['level'] = 'WARNING'
+        elif 'redefinition of unused' in data['description']:
+            data['level'] = 'WARNING'
+        elif 'assigned to but never used' in data['description']:
+            data['level'] = 'WARNING'
+        elif 'unable to detect undefined names' in data['description']:
+            data['level'] = 'WARNING'
+
+        # Flake8 seems to give the full path in the error output, but we only want the basename
+        data['filename'] = os.path.basename(data['filename'])
+
+        return data
+
+    def get_run_flags(self, _filepath):
+        # type: (str) -> Iterable[str]
+        flags = ["check", "--select", "ALL", "--ignore", 'Q00,PTH,D,ANN,T201,ERA001']
+        # if self.exclusions:
+        #     flags += ["--exclude", "{}".format(",".join(self.exclusions))]
+        #     flags += ["--force-exclude", "{}".format(",".join(
+        #         [os.path.join(os.path.dirname(_filepath), x)
+        #          for x in self.exclusions]))]
+        return flags
 
 
 class Pep8Runner(LintRunner):
@@ -854,6 +921,10 @@ class MyPy2Runner(LintRunner):
         if self.options.mypy_no_implicit_optional:
             flags += ['--no-implicit-optional']
 
+        if self.exclusions:
+            for e in self.exclusions:
+                flags += ["--exclude", e.replace("*", ".*") + "$"]
+
         # Per Guido's suggestion, use the --shadow-file option to work around
         # https://github.com/msherry/flycheck-pycheckers/issues/2, so we can
         # respect per-file mypy.ini config options
@@ -976,6 +1047,7 @@ RUNNERS = {
     'mypy2': MyPy2Runner,
     'mypy3': MyPy3Runner,
     'bandit': BanditRunner,
+    'ruff': RuffRunner
 }
 
 
