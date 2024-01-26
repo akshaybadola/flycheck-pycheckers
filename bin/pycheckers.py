@@ -23,6 +23,15 @@ from distutils.version import LooseVersion
 from functools import partial
 import shlex
 from subprocess import PIPE, Popen
+from pathlib import Path
+import logging
+
+from common_pyutil.log import get_file_logger
+
+_, logger = get_file_logger(Path.home().joinpath("logs"),
+                            "pycheckers", "pycheckers", new_file=False)
+logger.setLevel(logging.INFO)
+
 
 # TODO: Ignore the type of conditional imports until
 # https://github.com/python/mypy/issues/1107 is fixed
@@ -56,8 +65,9 @@ class FatalException(Exception):
         super(FatalException, self).__init__()
 
     def __str__(self):
-        return 'ERROR :pycheckers:{msg} at {filename} line 1.'.format(
+        msg = 'ERROR :pycheckers:{msg} at {filename} line 1.'.format(
             msg=self.msg, filename=self.filename)
+        logger.debug(msg)
 
 
 class _Path(object):
@@ -106,7 +116,8 @@ def str2bool(v):
 def croak(msgs, filename):
     # type: (Tuple[str], str) -> None
     for m in msgs:
-        print('ERROR :pycheckers:{} at {} line 1.'.format(m.strip(), filename), file=sys.stderr)
+        logger.error('ERROR :pycheckers:{} at {} line 1.'.format(m.strip(), filename))
+        print(m)
     sys.exit(1)
 
 
@@ -218,7 +229,7 @@ class LintRunner:
         """The linter's name, which is usually the same as the command.
 
         They may be different if there are multiple versions run with
-        flags -- e.g. the MyPy2Runner's name may be 'mypy2', even though
+        flags -- e.g. the MyPyRunner's name may be 'mypy2', even though
         the command is just 'mypy'.
         """
         return self.command
@@ -528,6 +539,7 @@ class LintRunner:
     def debug(self, line):
         # type: (str) -> None
         """Add a new line for debugging output"""
+        logger.debug(line)
         self._debug_lines.append(line)
 
     def _get_debug_output(self):
@@ -711,12 +723,7 @@ class RuffRunner(LintRunner):
 
     def get_run_flags(self, _filepath):
         # type: (str) -> Iterable[str]
-        flags = ["check", "--select", "ALL", "--ignore", 'Q00,PTH,D,ANN,T201,ERA001']
-        # if self.exclusions:
-        #     flags += ["--exclude", "{}".format(",".join(self.exclusions))]
-        #     flags += ["--force-exclude", "{}".format(",".join(
-        #         [os.path.join(os.path.dirname(_filepath), x)
-        #          for x in self.exclusions]))]
+        flags = ["check"]       # rest is handled by ruff config
         return flags
 
 
@@ -827,7 +834,7 @@ class PylintRunner(LintRunner):
         return not (returncode & 1 or returncode & 32)
 
 
-class MyPy2Runner(LintRunner):
+class MyPyRunner(LintRunner):
 
     # A few of our properties vary if we're in daemon mode:
 
@@ -905,9 +912,10 @@ class MyPy2Runner(LintRunner):
         original_filepath = filepath.replace('flycheck_', '')
 
         project_root = self.find_project_root(filepath)
-        flags += [
-            '--cache-dir={}'.format(self._get_cache_dir(project_root)),
-        ]
+        logger.debug("Not adding cache_dir to flags")
+        # flags += [
+        #     '--cache-dir={}'.format(self._get_cache_dir(project_root)),
+        # ]
         if self.name == 'mypy':
             # mypy2 mode
             flags += ['--py2']
@@ -916,7 +924,10 @@ class MyPy2Runner(LintRunner):
             'mypy_config_file',
             ['mypy.ini', '.mypy.ini', 'pyproject.toml', 'setup.cfg'])
         if config_file:
-            flags += ['--config-file', config_file]
+            with open(config_file) as f:
+                config_text = f.read()
+            if "[mypy]" in config_text:
+                flags += ['--config-file', config_file]
 
         if self.options.mypy_no_implicit_optional:
             flags += ['--no-implicit-optional']
@@ -948,8 +959,10 @@ class MyPy2Runner(LintRunner):
                 # current file buffer.
                 raise FatalException('Mypy daemon files command failed: ' + str(exc),
                                      filepath)
-
-
+        # with open("/home/joe/pychecker_mypy_flags", "a") as f:
+        #     f.write("\n")
+        #     f.write(f"{flags}")
+        logger.debug(f"MYPY run flags {flags}")
         return flags
 
     def fixup_data(self, _line, data, filepath):
@@ -960,6 +973,7 @@ class MyPy2Runner(LintRunner):
         # the original filename, not the flycheck-munged one
         original_filename = os.path.basename(filepath).replace('flycheck_', '')
         original_filepath = RootRelativePath(os.path.join(os.path.dirname(filepath), original_filename))
+        logger.debug(f"WTF is original_filepath {original_filepath}")
         if str(original_filename) not in data['filename']:
             return {}
 
@@ -973,7 +987,8 @@ class MyPy2Runner(LintRunner):
         # now, we can ensure that data['filename'] is a substring of filepath (or
         # vice-versa, just in case?)
 
-        if str(original_filepath) not in data['filename'] and data['filename'] not in str(original_filepath):
+        if str(original_filepath) not in data['filename'] and\
+           data['filename'] not in str(original_filepath):
             return {}
 
         data['filename'] = os.path.basename(original_filename)
@@ -981,6 +996,7 @@ class MyPy2Runner(LintRunner):
         data['level'] = data['level'].upper()
         if data['level'] == 'NOTE':
             data['level'] = 'INFO'
+        logger.debug(f"fixup_data return data: {data}")
         return data
 
     def get_filepath(self, filepath):
@@ -995,8 +1011,14 @@ class MyPy2Runner(LintRunner):
         return filepath.replace('flycheck_', '')
 
 
-class MyPy3Runner(MyPy2Runner):
+class MyPy2Runner(MyPyRunner):
+    @property
+    def name(self):
+        # type: () -> str
+        return 'mypy2'
 
+
+class MyPy3Runner(MyPyRunner):
     @property
     def name(self):
         # type: () -> str
@@ -1044,7 +1066,7 @@ RUNNERS = {
     'flake8': Flake8Runner,
     'pep8': Pep8Runner,
     'pylint': PylintRunner,
-    'mypy2': MyPy2Runner,
+    'mypy2': MyPyRunner,
     'mypy3': MyPy3Runner,
     'bandit': BanditRunner,
     'ruff': RuffRunner
